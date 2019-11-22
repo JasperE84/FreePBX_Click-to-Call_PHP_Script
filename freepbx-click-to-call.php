@@ -1,4 +1,7 @@
 <?php
+# This script is an adapted version of Alissons Pelizaro's version found here: https://github.com/alissonpelizaro/Asterisk-Click-to-Call
+# Script adapted to provide input validation and JSON results 
+
 # Asterisk host details
 $strHost = "127.0.0.1";
 $strUser = "admin";             #specify the asterisk manager username you want to login with
@@ -46,44 +49,92 @@ if (filter_var($_SERVER["REMOTE_ADDR"], FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_
 # Open socket
 if($result['Success'] === true)
 {
-        $errno = 0;
-        $errstr = 0;
         $strCallerId = sprintf($strCallerId, $strNumber);
 
-        $oSocket = fsockopen ($strHost, 5038, $errno, $errstr, 20);
-
+        # Create socket
+        $oSocket = stream_socket_client("tcp://$strHost:$strPort/ws");
         if (!$oSocket)
         {
                 $result['Success'] = false;
-                $result['Description'] = sprintf("Error while creating socket to [%s], %s (%s)", $strHost, $errstr, $errno);
+                $result['Description'] = sprintf("Error while creating socket to [%s]:%s, %s (%s)", $strHost, $intPort, $errstr, $errno);
         }
-        else
+
+        # Authenticate
+        if($result['Success'] === true)
         {
-                # Auth
-                fputs($oSocket, "Action: login\r\n");
-                fputs($oSocket, "Username: $strUser\r\n");
-                fputs($oSocket, "Secret: $strSecret\r\n\r\n");
+                // Prepare authentication request
+                $authenticationRequest = "Action: Login\r\n";
+                $authenticationRequest .= "Username: $strUser\r\n";
+                $authenticationRequest .= "Secret: $strSecret\r\n";
+                $authenticationRequest .= "Events: off\r\n\r\n";
 
-                # Call
-                fputs($oSocket, "Action: originate\r\n");
-                fputs($oSocket, "Events: off\r\n");
-                fputs($oSocket, "Channel: SIP/$strExten\r\n");
-                fputs($oSocket, "WaitTime: $strWaitTime\r\n");
-                fputs($oSocket, "CallerId: $strCallerId\r\n");
-                fputs($oSocket, "Exten: $strNumber\r\n");
-                fputs($oSocket, "Context: $strContext\r\n");
-                fputs($oSocket, "Priority: $strPriority\r\n\r\n");
-                fputs($oSocket, "Async: yes\r\n\r\n");
+                // Send authentication request
+                $authenticate = stream_socket_sendto($oSocket, $authenticationRequest);
+                if($authenticate < 0)
+                {
+                        $result['Success'] = false;
+                        $result['Description'] = sprintf("Error while writing login request to tcp socket");
+                }
+                else
+                {
+                        // Wait for server response
+                        usleep(200000);
 
-                # Deauth
-                fputs($oSocket, "Action: Logoff\r\n\r\n");
+                        // Read server response
+                        $authenticateResponse = fread($oSocket, 4096);
 
-                sleep(2);
-                fclose($oSocket);
-
-                $result['Description'] = sprintf("Extension %s should be calling %s.", $strExten, $strNumber);
+                        // Check if authentication was successful
+                        if(strpos($authenticateResponse, 'Success') === false)
+                        {
+                                $result['Success'] = false;
+                                $result['Description'] = sprintf("Error, could not authenticate to Asterisk Manager Interface");
+                        }
+                }
         }
+
+        # Originate call
+        if($result['Success'] === true)
+        {
+                // Prepare originate request
+                $originateRequest = "Action: Originate\r\n";
+                $originateRequest .= "Channel: SIP/$strExten\r\n";
+                $originateRequest .= "WaitTime: $strWaitTime\r\n";
+                $originateRequest .= "CallerId: $strCallerId\r\n";
+                $originateRequest .= "Exten: $strNumber\r\n";
+                $originateRequest .= "Context: $strContext\r\n";
+                $originateRequest .= "Priority: $strPriority\r\n";
+                $originateRequest .= "Async: yes\r\n\r\n";
+
+                $originate = stream_socket_sendto($oSocket, $originateRequest);
+                if($originate < 0)
+                {
+                        $result['Success'] = false;
+                        $result['Description'] = sprintf("Error, could not write call initiation request to socket.");
+                }
+                else
+                {
+                        // Wait for server response
+                        usleep(200000);
+
+                        // Read server response
+                        $originateResponse = fread($oSocket, 4096);
+
+                        // Check if originate was successful
+                        if(strpos($originateResponse, 'Success') !== false)
+                        {
+                                $result['Description'] = sprintf("Extension %s should be calling %s.", $strExten, $strNumber);
+                        }
+                        else
+                        {
+                                $result['Success'] = false;
+                                $result['Description'] = sprintf("Error, could not initiate call");
+                        }
+                }
+        }
+
+        # Deauth
+        stream_socket_sendto($oSocket, "Action: Logoff\r\n\r\n");
 }
 
 printf(json_encode($result, JSON_PRETTY_PRINT));
-?>
+
