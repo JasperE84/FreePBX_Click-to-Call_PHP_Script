@@ -29,6 +29,8 @@ $result = [
     'Success' => true,
     'ValidInput' => true,
     'Description' => '',
+    'Technology' => '',	
+    'OriginateResponse' => '',
 ];
 
 // Validate input parameters
@@ -68,6 +70,7 @@ if ($result['Success']) {
 
             if (preg_match('/Val: (\w+)/', $dbGetResponse, $matches)) {
                 $tech = strtoupper($matches[1]);
+                $result['Technology'] = $tech; // Add technology to result JSON
             } else {
                 $result = setError($result, "Failed to retrieve technology for extension: %s", $extension);
             }
@@ -78,6 +81,7 @@ if ($result['Success']) {
                 fwrite($socket, $originateRequest);
                 usleep(200000);
                 $originateResponse = fread($socket, 4096);
+                $result['OriginateResponse'] = $originateResponse;
 
                 if (strpos($originateResponse, 'Success') !== false) {
                     $result['Description'] = "Extension $extension is calling $number.";
