@@ -1,140 +1,96 @@
 <?php
-# This script is an adapted version of Alissons Pelizaro's version found here: https://github.com/alissonpelizaro/Asterisk-Click-to-Call
-# Script adapted to provide input validation and JSON results 
+/**
+ * FreePBX Click-to-Call PHP Script
+ * Adapted from Alisson Pelizaro's version: https://github.com/alissonpelizaro/Asterisk-Click-to-Call
+ * Provides input validation, JSON results, and improved readability.
+ * Provides pjsip support and error handling.
+ * This script is intended to be used with FreePBX and Asterisk for click-to-call functionality.
+ */
 
-# Asterisk host details
-$strHost = "127.0.0.1";
-$strUser = "admin";             #specify the asterisk manager username you want to login with
-$strSecret = "MYSECRETPASS";    #specify the password for the above user, can be fetched from /etc/asterisk/manager.conf
+// Configuration settings
+$config = [
+    'host' => '127.0.0.1',
+    'port' => 5038, // Default AMI port
+    'user' => 'admin', // AMI username
+    'secret' => 'MYSECRETPASS', // AMI password
+    'callerIdTemplate' => 'CTR Plugin (%s)',
+    'context' => 'from-internal',
+    'waitTime' => 30,
+    'priority' => 1,
+    'maxRetry' => 2,
+];
 
-# Config
-$strCallerId = "CTR Plugin (%s)"; #specify caller id with number to be called in %s placeholder
-$strContext = "from-internal";
-$strWaitTime = "30";            #specify the amount of time you want to try calling the specified channel before hangin up
-$strPriority = "1";             #specify the priority you wish to place on making this call
-$strMaxRetry = "2";             #specify the maximum amount of retries
+// Retrieve and sanitize request parameters
+$extension = isset($_REQUEST['exten']) ? trim($_REQUEST['exten']) : '';
+$number = isset($_REQUEST['number']) ? trim(strtolower($_REQUEST['number'])) : '';
+$tech = isset($_REQUEST['tech']) && strtolower($_REQUEST['tech']) === 'pjsip' ? 'PJSIP' : 'SIP'; // Default to SIP if not specified
 
-# Request data
-$strExten = $_REQUEST['exten'];
-$strNumber = strtolower($_REQUEST['number']);
+// Initialize result array
+$result = [
+    'Success' => true,
+    'ValidInput' => true,
+    'Description' => '',
+];
 
-#
-# Script execution
-#
-$result = array('Success' => true, 'ValidInput' => true, 'Description' => '');
-
-# Data validation
-if(!preg_match('/^\\+?[0-9]+$/i', $strNumber))
-{
-        $result['ValidInput'] = false;
-        $result['Success'] = false;
-        $result['Description'] = sprintf("Error, number to call must be provided and may only contain numeric characters and a leading plus symbol, number called was: %s", $strNumber);
+// Validate input parameters
+if (!preg_match('/^\\+?[0-9]+$/', $number)) {
+    $result = setError($result, "Invalid number format: %s", $number);
 }
 
-if(!preg_match('/^[0-9]+$/i', $strExten))
-{
-        $result['ValidInput'] = false;
-        $result['Success'] = false;
-        $result['Description'] = sprintf("Error, extension to call from must be provided and may only contain numeric characters, extension provided was: %s", $strExten);
+if (!preg_match('/^[0-9]+$/', $extension)) {
+    $result = setError($result, "Invalid extension format: %s", $extension);
 }
 
-
-# Exit if not a local request
-if (filter_var($_SERVER["REMOTE_ADDR"], FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) )
-{
-        $result['Success'] = false;
-        $result['Description'] = sprintf("Error, %s is not a local IP",$_SERVER["REMOTE_ADDR"]);
+// Check if request is from a local IP address
+if ($result['Success'] && filter_var($_SERVER["REMOTE_ADDR"], FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+    $result = setError($result, "Unauthorized IP address: %s", $_SERVER["REMOTE_ADDR"]);
 }
 
-# Open socket
-if($result['Success'] === true)
-{
-        $strCallerId = sprintf($strCallerId, $strNumber);
+// Establish socket connection and authenticate
+if ($result['Success']) {
+    $socket = stream_socket_client("tcp://{$config['host']}:{$config['port']}", $errno, $errstr);
 
-        # Create socket
-        $oSocket = stream_socket_client("tcp://$strHost:$strPort/ws");
-        if (!$oSocket)
-        {
-                $result['Success'] = false;
-                $result['Description'] = sprintf("Error while creating socket to [%s]:%s, %s (%s)", $strHost, $intPort, $errstr, $errno);
+    if (!$socket) {
+        $result = setError($result, "Socket connection failed: %s (%s)", $errstr, $errno);
+    } else {
+        $authRequest = "Action: Login\r\nUsername: {$config['user']}\r\nSecret: {$config['secret']}\r\nEvents: off\r\n\r\n";
+        fwrite($socket, $authRequest);
+        usleep(200000);
+        $authResponse = fread($socket, 4096);
+
+        if (strpos($authResponse, 'Success') === false) {
+            $result = setError($result, "Authentication failed");
+        } else {
+            // Originate call with support for both chan_sip and chan_pjsip
+            $originateRequest = "Action: Originate\r\nChannel: $tech/$extension\r\nWaitTime: {$config['waitTime']}\r\nCallerId: " . sprintf($config['callerIdTemplate'], $number) . "\r\nExten: $number\r\nContext: {$config['context']}\r\nPriority: {$config['priority']}\r\nAsync: yes\r\n\r\n";
+            fwrite($socket, $originateRequest);
+            usleep(200000);
+            $originateResponse = fread($socket, 4096);
+
+            if (strpos($originateResponse, 'Success') !== false) {
+                $result['Description'] = "Extension $extension is calling $number.";
+            } else {
+                $result = setError($result, "Call initiation failed");
+            }
+
+            // Logoff
+            fwrite($socket, "Action: Logoff\r\n\r\n");
         }
 
-        # Authenticate
-        if($result['Success'] === true)
-        {
-                // Prepare authentication request
-                $authenticationRequest = "Action: Login\r\n";
-                $authenticationRequest .= "Username: $strUser\r\n";
-                $authenticationRequest .= "Secret: $strSecret\r\n";
-                $authenticationRequest .= "Events: off\r\n\r\n";
-
-                // Send authentication request
-                $authenticate = stream_socket_sendto($oSocket, $authenticationRequest);
-                if($authenticate < 0)
-                {
-                        $result['Success'] = false;
-                        $result['Description'] = sprintf("Error while writing login request to tcp socket");
-                }
-                else
-                {
-                        // Wait for server response
-                        usleep(200000);
-
-                        // Read server response
-                        $authenticateResponse = fread($oSocket, 4096);
-
-                        // Check if authentication was successful
-                        if(strpos($authenticateResponse, 'Success') === false)
-                        {
-                                $result['Success'] = false;
-                                $result['Description'] = sprintf("Error, could not authenticate to Asterisk Manager Interface");
-                        }
-                }
-        }
-
-        # Originate call
-        if($result['Success'] === true)
-        {
-                // Prepare originate request
-                $originateRequest = "Action: Originate\r\n";
-                $originateRequest .= "Channel: SIP/$strExten\r\n";
-                $originateRequest .= "WaitTime: $strWaitTime\r\n";
-                $originateRequest .= "CallerId: $strCallerId\r\n";
-                $originateRequest .= "Exten: $strNumber\r\n";
-                $originateRequest .= "Context: $strContext\r\n";
-                $originateRequest .= "Priority: $strPriority\r\n";
-                $originateRequest .= "Async: yes\r\n\r\n";
-
-                $originate = stream_socket_sendto($oSocket, $originateRequest);
-                if($originate < 0)
-                {
-                        $result['Success'] = false;
-                        $result['Description'] = sprintf("Error, could not write call initiation request to socket.");
-                }
-                else
-                {
-                        // Wait for server response
-                        usleep(200000);
-
-                        // Read server response
-                        $originateResponse = fread($oSocket, 4096);
-
-                        // Check if originate was successful
-                        if(strpos($originateResponse, 'Success') !== false)
-                        {
-                                $result['Description'] = sprintf("Extension %s should be calling %s.", $strExten, $strNumber);
-                        }
-                        else
-                        {
-                                $result['Success'] = false;
-                                $result['Description'] = sprintf("Error, could not initiate call");
-                        }
-                }
-        }
-
-        # Deauth
-        stream_socket_sendto($oSocket, "Action: Logoff\r\n\r\n");
+        fclose($socket);
+    }
 }
 
-printf(json_encode($result, JSON_PRETTY_PRINT));
+// Helper function to set error
+function setError($result, $message, ...$args) {
+    $result['Success'] = false;
+    $result['ValidInput'] = false;
+    $result['Description'] = vsprintf($message, $args);
+    return $result;
+}
 
+// Output JSON result
+header('Content-Type: application/json');
+echo json_encode($result, JSON_PRETTY_PRINT);
+
+?>
