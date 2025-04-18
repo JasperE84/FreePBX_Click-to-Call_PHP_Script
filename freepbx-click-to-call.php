@@ -23,7 +23,6 @@ $config = [
 // Retrieve and sanitize request parameters
 $extension = isset($_REQUEST['exten']) ? trim($_REQUEST['exten']) : '';
 $number = isset($_REQUEST['number']) ? trim(strtolower($_REQUEST['number'])) : '';
-$tech = isset($_REQUEST['tech']) && strtolower($_REQUEST['tech']) === 'pjsip' ? 'PJSIP' : 'SIP'; // Default to SIP if not specified
 
 // Initialize result array
 $result = [
@@ -61,16 +60,30 @@ if ($result['Success']) {
         if (strpos($authResponse, 'Success') === false) {
             $result = setError($result, "Authentication failed");
         } else {
-            // Originate call with support for both chan_sip and chan_pjsip
-            $originateRequest = "Action: Originate\r\nChannel: $tech/$extension\r\nWaitTime: {$config['waitTime']}\r\nCallerId: " . sprintf($config['callerIdTemplate'], $number) . "\r\nExten: $number\r\nContext: {$config['context']}\r\nPriority: {$config['priority']}\r\nAsync: yes\r\n\r\n";
-            fwrite($socket, $originateRequest);
+            // Fetch technology from Asterisk extension database
+            $dbGetRequest = "Action: DBGet\r\nFamily: DEVICE\r\nKey: $extension/tech\r\n\r\n";
+            fwrite($socket, $dbGetRequest);
             usleep(200000);
-            $originateResponse = fread($socket, 4096);
+            $dbGetResponse = fread($socket, 4096);
 
-            if (strpos($originateResponse, 'Success') !== false) {
-                $result['Description'] = "Extension $extension is calling $number.";
+            if (preg_match('/Val: (\w+)/', $dbGetResponse, $matches)) {
+                $tech = strtoupper($matches[1]);
             } else {
-                $result = setError($result, "Call initiation failed");
+                $result = setError($result, "Failed to retrieve technology for extension: %s", $extension);
+            }
+
+            if ($result['Success']) {
+                // Originate call with retrieved technology
+                $originateRequest = "Action: Originate\r\nChannel: $tech/$extension\r\nWaitTime: {$config['waitTime']}\r\nCallerId: " . sprintf($config['callerIdTemplate'], $number) . "\r\nExten: $number\r\nContext: {$config['context']}\r\nPriority: {$config['priority']}\r\nAsync: yes\r\n\r\n";
+                fwrite($socket, $originateRequest);
+                usleep(200000);
+                $originateResponse = fread($socket, 4096);
+
+                if (strpos($originateResponse, 'Success') !== false) {
+                    $result['Description'] = "Extension $extension is calling $number.";
+                } else {
+                    $result = setError($result, "Call initiation failed");
+                }
             }
 
             // Logoff
